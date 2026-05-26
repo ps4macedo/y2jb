@@ -15,7 +15,7 @@
 
 (async function () {
     try {
-        const p2jb_version = "P2JB 2.4 (Y2JB port) + PM original close T030";
+        const p2jb_version = "P2JB 2.6 (Y2JB port)";
 
         const PAGE_SIZE = 0x4000;
 
@@ -114,12 +114,6 @@
         };
 
         function ensure_kernel_offset() {
-            try {
-                if (typeof kernel_offset === "object" && kernel_offset !== null
-                    && kernel_offset.DATA_BASE_ALLPROC !== undefined) return;
-                kernel_offset = get_kernel_offset();
-                return;
-            } catch (_) { }
 
             let key = FW_VERSION;
             if (FW_ALIAS_P2JB[key]) key = FW_ALIAS_P2JB[key];
@@ -2056,7 +2050,11 @@
                 if (p_type !== 0x01n) continue;
 
                 const PROT_RW = PROT_READ | PROT_WRITE;
-                const PROT_RWX = PROT_READ | PROT_WRITE | PROT_EXEC;
+
+                const PROT_X = (typeof PROT_EXEC !== "undefined")
+                    ? PROT_EXEC
+                    : (typeof PROT_EXECUTE !== "undefined" ? PROT_EXECUTE : 0x4n);
+                const PROT_RWX = PROT_READ | PROT_WRITE | PROT_X;
 
                 if ((p_flags & 0x1n) === 0x1n) {
                     executable_start = p_vaddr;
@@ -2130,7 +2128,27 @@
             return { thr_handle: read64(thr_handle_addr), payloadout };
         }
 
-        async function stage_load_elf(S) {
+        function get_y2jb_version() {
+            if (typeof version_string !== "string") return null;
+            const m = version_string.match(/Y2JB\s+(\d+)\.(\d+)/);
+            return m ? { major: +m[1], minor: +m[2], str: version_string } : null;
+        }
+        function y2jb_ge15(v) {
+            return v !== null && (v.major > 1 || (v.major === 1 && v.minor >= 5));
+        }
+
+        function resolve_title_id() {
+            if (typeof TITLE_ID === "string" && TITLE_ID.length > 0) return TITLE_ID;
+            if (typeof get_title_id === "function") {
+                try {
+                    const t = get_title_id();
+                    if (typeof t === "string" && t.length > 0) return t;
+                } catch (_) { }
+            }
+            return null;
+        }
+
+        async function stage_load_elf_via_sandbox(S) {
             await ulog("stage_elfldr: entered (sandbox-slot elf_run handoff)");
             if (!S.data_base_ok) {
                 await ulog("stage_elfldr: kernel data_base not resolved - skipped");
@@ -2139,26 +2157,50 @@
             }
             try {
 
-                const ELFLDR_NAMES = ["elfldr_1320_v5.elf", "elfldr.elf"];
-                const SANDBOX_BASE = "/download0/cache/splash_screen/" +
-                    "aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY=/";
-                let elf_path = null;
-                outer:
-                for (const slot of ["000", "001", "002"]) {
-                    for (const name of ELFLDR_NAMES) {
-                        const p = "/mnt/sandbox/" + TITLE_ID + "_" + slot +
-                            SANDBOX_BASE + name;
-                        if (file_exists(p)) { elf_path = p; break outer; }
+                const is_y2jb_14 = (typeof TITLE_ID === "string" && TITLE_ID.length > 0);
+                let elf_path = null, elf_source = null;
+                if (is_y2jb_14) {
+                    const ELFLDR_NAMES_SBX = ["elfldr_1320_v5.elf"];
+                    const SANDBOX_BASE = "/download0/cache/splash_screen/" +
+                        "aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY=/";
+                    const title_id = resolve_title_id();
+                    outer:
+                    for (const slot of ["000", "001", "002"]) {
+                        for (const name of ELFLDR_NAMES_SBX) {
+                            const p = "/mnt/sandbox/" + title_id + "_" + slot +
+                                SANDBOX_BASE + name;
+                            if (file_exists(p)) {
+                                elf_path = p; elf_source = "sandbox"; break outer;
+                            }
+                        }
+                    }
+                    if (!elf_path) {
+                        await ulog("stage_elfldr: elfldr_1320_v5.elf not in any " +
+                            "Y2JB 1.4 sandbox slot - skipped");
+                        send_notification("Stage 7\nelfldr not in sandbox\n" +
+                            "(jailbreak still complete)");
+                        return;
+                    }
+                } else {
+                    const ELFLDR_NAMES_USB = ["elfldr_1320_v5.elf",
+                        "elfldr_1320.elf", "elfldr.elf"];
+                    for (let u = 0; u < 8 && !elf_path; u++) {
+                        for (const name of ELFLDR_NAMES_USB) {
+                            const p = "/mnt/usb" + u + "/" + name;
+                            if (file_exists(p)) {
+                                elf_path = p; elf_source = "usb"; break;
+                            }
+                        }
+                    }
+                    if (!elf_path) {
+                        await ulog("stage_elfldr: elfldr not found on /mnt/usb0..7 " +
+                            "(Y2JB 1.3 requires USB delivery) - skipped");
+                        send_notification("Stage 7\nelfldr not on USB\n" +
+                            "(put elfldr_1320.elf on USB and retry)");
+                        return;
                     }
                 }
-                if (!elf_path) {
-                    await ulog("stage_elfldr: no bundled elfldr found in any " +
-                        "Y2JB sandbox slot - skipped");
-                    send_notification("Stage 7\nelfldr not in sandbox\n" +
-                        "(jailbreak still complete)");
-                    return;
-                }
-                await ulog("stage_elfldr: found " + elf_path);
+                await ulog("stage_elfldr: found (" + elf_source + ") " + elf_path);
 
                 ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
                 kernel.addr.data_base = S.data_base;
@@ -2195,7 +2237,43 @@
             }
         }
 
+        async function stage_load_elf_via_kexp(S) {
+            await ulog("stage_elfldr: entered (kexp / load_aioshellcode handoff)");
+            if (!S.data_base_ok) {
+                await ulog("stage_elfldr: kernel data_base not resolved - skipped");
+                send_notification("Stage 7\nelf loader skipped (no data_base)");
+                return;
+            }
+            try {
+                if (typeof load_aioshellcode !== "function") {
+                    await ulog("stage_elfldr: load_aioshellcode not in scope - " +
+                        "kexp delivery unavailable");
+                    send_notification("Stage 7\nload_aioshellcode missing\n" +
+                        "(jailbreak still complete)");
+                    return;
+                }
 
+                const allproc = S.data_base + S.OFF.DATA_BASE_ALLPROC;
+                const master_pipe = [BigInt(S.master_rfd), BigInt(S.master_wfd)];
+                const victim_pipe = [BigInt(S.victim_rfd), BigInt(S.victim_wfd)];
+                await ulog("stage_elfldr: handoff -> load_aioshellcode " +
+                    "(allproc=" + toHex(allproc) +
+                    " master=" + S.master_rfd + "," + S.master_wfd +
+                    " victim=" + S.victim_rfd + "," + S.victim_wfd + ")");
+
+                await load_aioshellcode(allproc, master_pipe, victim_pipe);
+
+                await ulog("stage_elfldr: load_aioshellcode returned - " +
+                    "elfldr should now be listening on :9021");
+                send_notification("Stage 7\nelfldr running - send your ELF to\n" +
+                    "<ps5-ip>:9021");
+            } catch (e) {
+                await ulog("stage_elfldr: kexp handoff failed: " + e.message +
+                    " (jailbreak unaffected)");
+                send_notification("Stage 7\nkexp failed: " + e.message +
+                    "\n(jailbreak still complete)");
+            }
+        }
 
         async function p2jb_bootstrap_payload_manager_after_complete() {
             const PM_PORT = 9021;
@@ -2310,16 +2388,6 @@
                 return out;
             }
 
-            const PM_CLOSE_DELAY_MS = 3000;
-
-            async function close_youtube_after_pm_delay(delay_ms) {
-                await blog("closing YouTube in " + delay_ms + " ms after Payload Manager send");
-                send_notification("Payload Manager sent\nclosing YouTube in " + delay_ms + " ms");
-                await js_sleep(delay_ms);
-                const pid = syscall(SYSCALL.getpid);
-                syscall(SYSCALL.kill, pid, SIGKILL);
-            }
-
             await blog("starting after p2jb complete");
             await blog("elfldr target 127.0.0.1:" + PM_PORT);
 
@@ -2336,20 +2404,22 @@
             const f = read_file_to_buffer_local(pm_path);
             await blog("loading " + f.size + " bytes: " + pm_path);
             await send_buffer_to_elfldr(pm_path, f.buffer, f.size);
-            await blog("Payload Manager sent; original ELF left intact");
-            await close_youtube_after_pm_delay(PM_CLOSE_DELAY_MS);
             await blog("complete");
         }
 
         send_notification(p2jb_version + "\nport by matem6");
 
         {
+
+            const has_title_id = (typeof TITLE_ID === "string" && TITLE_ID.length > 0)
+                || (typeof get_title_id === "function");
             if (typeof ipv6_kernel_rw === "undefined" ||
-                typeof TITLE_ID !== "string" || TITLE_ID.length === 0 ||
+                !has_title_id ||
                 typeof file_exists !== "function" ||
                 typeof read_file !== "function") {
                 await ulog("FATAL: Y2JB framework helpers missing " +
-                    "(ipv6_kernel_rw / TITLE_ID / file_exists / read_file)");
+                    "(ipv6_kernel_rw / TITLE_ID|get_title_id / " +
+                    "file_exists / read_file)");
                 send_notification("p2jb: Y2JB framework helpers missing\n" +
                     "(update y2jb and retry)");
                 return;
@@ -2429,7 +2499,15 @@
         await stage6(S);
         await stage7(S);
         await stage_debug_menu(S);
-        await stage_load_elf(S);
+
+        const yver = get_y2jb_version();
+        await ulog("stage_elfldr: detected " +
+            (yver ? yver.str : "Y2JB <unknown version_string>"));
+        if (y2jb_ge15(yver)) {
+            await stage_load_elf_via_kexp(S);
+        } else {
+            await stage_load_elf_via_sandbox(S);
+        }
 
         try {
             const B = S.proc_ucred;
