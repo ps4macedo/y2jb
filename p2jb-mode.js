@@ -2395,7 +2395,7 @@
                 send_notification("Payload Manager sent\nclosing YouTube in " + delay_ms + " ms");
                 await js_sleep(delay_ms);
                 const pid = syscall(SYSCALL.getpid);
-                syscall(SYSCALL.kill, pid, 9n);
+                syscall(SYSCALL.kill, pid, SIGKILL);
             }
 
             await blog("starting after p2jb complete");
