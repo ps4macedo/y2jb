@@ -15,7 +15,7 @@
 
 (async function () {
     try {
-        const p2jb_version = "P2JB 2.6 (Y2JB port)";
+        const p2jb_version = "P2JB 2.6 (Y2JB port) + PM close T036";
 
         const PAGE_SIZE = 0x4000;
 
@@ -2388,6 +2388,16 @@
                 return out;
             }
 
+            const PM_CLOSE_DELAY_MS = 3000;
+
+            async function close_youtube_after_pm_delay(delay_ms) {
+                await blog("closing YouTube in " + delay_ms + " ms after Payload Manager send");
+                send_notification("Payload Manager sent\nclosing YouTube in " + delay_ms + " ms");
+                await js_sleep(delay_ms);
+                const pid = syscall(SYSCALL.getpid);
+                syscall(SYSCALL.kill, pid, 9n);
+            }
+
             await blog("starting after p2jb complete");
             await blog("elfldr target 127.0.0.1:" + PM_PORT);
 
@@ -2404,6 +2414,8 @@
             const f = read_file_to_buffer_local(pm_path);
             await blog("loading " + f.size + " bytes: " + pm_path);
             await send_buffer_to_elfldr(pm_path, f.buffer, f.size);
+            await blog("Payload Manager sent; closing path armed");
+            await close_youtube_after_pm_delay(PM_CLOSE_DELAY_MS);
             await blog("complete");
         }
 
